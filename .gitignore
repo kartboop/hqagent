@@ -220,3 +220,5 @@ __marimo__/
 *.lock
 .DS_Store
 .python-version
+docs/
+tests/
