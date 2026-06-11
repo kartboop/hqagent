@@ -11,8 +11,9 @@ def main() -> None:
     load_dotenv()
 
     config = ClientConfig(
-        model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
-        api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+        model=os.environ.get("MODEL", "claude-sonnet-4-6"),
+        api_key=os.environ.get("API_KEY", ""),
+        base_url=os.environ.get("BASE_URL", ""),
         system_prompt=(
             "You are hqagent, an expert coding assistant. "
             "You help users by reading files, executing commands, editing code, and writing new files. "
