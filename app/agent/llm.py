@@ -19,7 +19,6 @@ class ClientConfig:
     max_retries: int = 3
     timeout: float = 120.0
     thinking: bool = False
-    thinking_budget: int = 8000
     stream: bool = True
     extra_headers: dict = field(default_factory=dict)
 
@@ -69,10 +68,7 @@ class LLMClient:
     def _extra_params(self) -> dict:
         params: dict = {}
         if self.cfg.thinking:
-            params["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": self.cfg.thinking_budget,
-            }
+            params["thinking"] = {"type": "adaptive"}
         return params
 
     async def create(
@@ -80,10 +76,12 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> anthropic.types.Message:
         """Send a request. Streams if cfg.stream=True and on_text is provided.
 
         Returns the full Message object (content blocks already collected).
+        Falls back to non-streaming on stream read errors.
         """
         tools_param = self._build_tools_param(tools or [])
         extra = self._extra_params()
@@ -99,7 +97,10 @@ class LLMClient:
             kwargs["tools"] = tools_param
 
         if self.cfg.stream and on_text is not None:
-            return await self._stream(kwargs, on_text)
+            try:
+                return await self._stream(kwargs, on_text, on_thinking)
+            except Exception:
+                return await self.create_non_stream(messages, tools=tools, on_text=on_text, on_thinking=on_thinking)
         else:
             resp = await self._client.messages.create(**kwargs)
             self.usage.update(resp.usage)
@@ -109,24 +110,75 @@ class LLMClient:
         self,
         kwargs: dict,
         on_text: Callable[[str], None],
+        on_thinking: Callable[[str], None] | None = None,
     ) -> anthropic.types.Message:
+        current_block_type: str | None = None
         async with self._client.messages.stream(**kwargs) as stream:
-            async for text in stream.text_stream:
-                on_text(text)
+            async for event in stream:
+                etype = getattr(event, "type", None)
+                if etype == "content_block_start":
+                    current_block_type = event.content_block.type
+                    if current_block_type == "thinking" and on_thinking:
+                        on_thinking("<think>\n")
+                elif etype == "content_block_delta":
+                    delta = event.delta
+                    dtype = getattr(delta, "type", None)
+                    if dtype == "thinking_delta" and on_thinking:
+                        on_thinking(delta.thinking)
+                    elif dtype == "text_delta":
+                        on_text(delta.text)
+                elif etype == "content_block_stop":
+                    if current_block_type == "thinking" and on_thinking:
+                        on_thinking("\n</think>\n\n")
+                    current_block_type = None
             msg = await stream.get_final_message()
         self.usage.update(msg.usage)
         return msg
+
+    async def create_non_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
+    ) -> anthropic.types.Message:
+        """Non-streaming create that still calls on_text with the full response."""
+        tools_param = self._build_tools_param(tools or [])
+        extra = self._extra_params()
+
+        kwargs: dict = dict(
+            model=self.cfg.model,
+            max_tokens=self.cfg.max_tokens,
+            system=self.cfg.system_prompt,
+            messages=messages,
+            **extra,
+        )
+        if tools_param:
+            kwargs["tools"] = tools_param
+
+        resp = await self._client.messages.create(**kwargs)
+        self.usage.update(resp.usage)
+        if on_thinking:
+            for block in resp.content:
+                if block.type == "thinking":
+                    on_thinking(f"<think>\n{block.thinking}\n</think>\n\n")
+        text = self.extract_text(resp)
+        if on_text and text:
+            on_text(text)
+        return resp
 
     async def create_with_continuation(
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
         max_continuations: int = 5,
+        prefer_non_stream: bool = False,
     ) -> anthropic.types.Message:
         """Handle pause_turn by automatically continuing the conversation."""
         for _ in range(max_continuations):
-            resp = await self.create(messages, tools=tools, on_text=on_text)
+            resp = await self.create(messages, tools=tools, on_text=on_text, on_thinking=on_thinking)
             if resp.stop_reason != "pause_turn":
                 return resp
             # pause_turn: push assistant content and let Claude continue

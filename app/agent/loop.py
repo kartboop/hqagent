@@ -56,6 +56,7 @@ class AgentLoop:
         skills_dir: str = "skills",
         tasks_dir: str = ".hqagent/tasks",
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
     ) -> None:
@@ -71,6 +72,7 @@ class AgentLoop:
 
         # Callbacks for streaming output / observability
         self.on_text = on_text or (lambda t: print(t, end="", flush=True))
+        self.on_thinking = on_thinking or self._default_on_thinking
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
 
@@ -78,6 +80,10 @@ class AgentLoop:
         self.llm.cfg.system_prompt = _build_system_prompt(
             self.llm.cfg.system_prompt, self.skill_loader
         )
+
+    @staticmethod
+    def _default_on_thinking(t: str) -> None:
+        print(f"\033[2m{t}\033[0m", end="", flush=True)
 
     # ------------------------------------------------------------------
     # Tool registration
@@ -148,6 +154,7 @@ class AgentLoop:
                 messages=self.context.to_list(),
                 tools=self.registry.schemas(),
                 on_text=self.on_text,
+                on_thinking=self.on_thinking if self.llm.cfg.thinking else None,
             )
 
             stop = resp.stop_reason
