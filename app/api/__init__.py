@@ -69,6 +69,7 @@ def _build_agent_loop() -> AgentLoop:
             "Use edit for precise changes. "
             "Use write only for new files or complete rewrites."
         ),
+        thinking=os.environ.get("THINKING", "true").lower() not in ("0", "false", "no"),
         stream=True,
     )
     return AgentLoop(
@@ -150,7 +151,8 @@ class SessionInfo(BaseModel):
 
 
 def _sse_event(event: str, data: dict | str) -> str:
-    payload = data if isinstance(data, str) else json.dumps(data, default=str)
+    # Always JSON-encode so newlines inside string payloads don't break SSE framing
+    payload = json.dumps(data, default=str)
     return f"event: {event}\ndata: {payload}\n\n"
 
 
@@ -162,6 +164,9 @@ async def _stream_chat(loop: AgentLoop, user_message: str):
     def on_text(text: str) -> None:
         send_queue.put_nowait(("text", text))
 
+    def on_thinking(chunk: str) -> None:
+        send_queue.put_nowait(("thinking", chunk))
+
     def on_tool_call(name: str, inp: dict) -> None:
         send_queue.put_nowait(("tool_call", {"name": name, "input": inp}))
 
@@ -169,6 +174,7 @@ async def _stream_chat(loop: AgentLoop, user_message: str):
         send_queue.put_nowait(("tool_result", {"name": name, "result": result[:500]}))
 
     loop.on_text = on_text
+    loop.on_thinking = on_thinking
     loop.on_tool_call = on_tool_call
     loop.on_tool_result = on_tool_result
 
@@ -288,7 +294,7 @@ async def chat(req: ChatRequest):
       - error:       An error occurred.
     """
     sid = req.session_id
-    if sid is None:
+    if sid is None or sid not in _sessions:
         sid = uuid.uuid4().hex[:12]
         _sessions[sid] = _Session(_build_agent_loop())
 
